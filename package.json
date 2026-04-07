@@ -1,0 +1,40 @@
+{
+  "name": "code-challenge-tl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Challenge 1 - Payment settlement pipeline",
+  "scripts": {
+    "start:payment-api": "tsx apps/payment-api/src/main.ts",
+    "start:outbox-relay": "tsx apps/outbox-relay/src/main.ts",
+    "start:fraud-worker": "tsx apps/fraud-worker/src/main.ts",
+    "start:ledger-worker": "tsx apps/ledger-worker/src/main.ts",
+    "test": "jest --runInBand",
+    "typecheck": "tsc --noEmit -p tsconfig.base.json",
+    "lint": "tsc --noEmit -p tsconfig.base.json",
+    "prisma:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
+    "prisma:migrate:dev": "prisma migrate dev --schema packages/db/prisma/schema.prisma",
+    "prisma:migrate:deploy": "prisma migrate deploy --schema packages/db/prisma/schema.prisma",
+    "db:seed": "tsx packages/db/seed.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-express": "^11.1.6",
+    "@prisma/client": "^6.8.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "kafkajs": "^2.2.4",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.15.3",
+    "jest": "^29.7.0",
+    "prisma": "^6.8.2",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}

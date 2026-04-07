@@ -1,0 +1,99 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PaymentStatus {
+  pending
+  settled
+  failed
+}
+
+enum StepStatus {
+  pending
+  completed
+  failed
+}
+
+enum OutboxStatus {
+  pending
+  published
+  failed
+}
+
+enum LedgerEntryType {
+  debit
+  credit
+}
+
+model Payment {
+  id          String        @id @default(uuid()) @db.Uuid
+  countryCode String
+  amount      Decimal       @db.Decimal(18, 2)
+  currency    String
+  status      PaymentStatus @default(pending)
+  fraudStatus StepStatus    @default(pending)
+  ledgerStatus StepStatus   @default(pending)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  fraudResult   FraudResult?
+  ledgerEntries LedgerEntry[]
+
+  @@map("payments")
+}
+
+model OutboxEvent {
+  id            String      @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String      @db.Uuid
+  eventType     String
+  topic         String
+  payload       Json
+  status        OutboxStatus @default(pending)
+  attempts      Int          @default(0)
+  createdAt     DateTime     @default(now())
+  publishedAt   DateTime?
+
+  @@index([status, createdAt])
+  @@map("outbox_events")
+}
+
+model ProcessedEvent {
+  consumerName String
+  eventId      String   @db.Uuid
+  processedAt  DateTime @default(now())
+
+  @@id([consumerName, eventId])
+  @@map("processed_events")
+}
+
+model FraudResult {
+  paymentId  String   @id @db.Uuid
+  decision   String
+  riskLevel  String
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@map("fraud_results")
+}
+
+model LedgerEntry {
+  id        String          @id @default(uuid()) @db.Uuid
+  paymentId String          @db.Uuid
+  entryType LedgerEntryType
+  amount    Decimal         @db.Decimal(18, 2)
+  currency  String
+  createdAt DateTime        @default(now())
+
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([paymentId])
+  @@map("ledger_entries")
+}

@@ -1,197 +1,204 @@
-# Yape Code Challenge 🚀
+﻿# Challenge 1: Payment Settlement Pipeline
 
-Welcome. This challenge is designed for experienced engineers being considered for **tech lead and staff-level** roles. It tests your ability to reason about distributed systems, event-driven architecture, and platform design — not just your ability to ship working code.
+## Alcance elegido
+Este repositorio implementa **solo el Challenge 1** del reto: pipeline distribuido de settlement de pagos con consistencia eventual explícita.
 
-There are three challenges. **Pick one.** Go deep rather than broad.
+Elegí este challenge porque evalúa directamente decisiones de arquitectura orientadas a confiabilidad (outbox transaccional, relay separado, idempotencia en consumidores, DLT y estados observables).
 
----
+## Arquitectura propuesta
+Procesos (contenedores) separados:
+1. `payment-api`: expone `POST /payments` y `GET /payments/:id`.
+2. `outbox-relay`: lee `outbox_events` y publica a Kafka.
+3. `fraud-worker`: consume `payment.created.v1`, aplica lógica de fraude e idempotencia.
+4. `ledger-worker`: consume `payment.created.v1`, crea asientos e idempotencia.
+5. `postgres`: persistencia única para simplificar el challenge.
+6. `kafka` (+ `kafka-ui` opcional).
 
-## Table of Contents
+Flujo:
+1. API crea `payments` + `outbox_events` en **una sola transacción SQL**.
+2. Relay publica evento pendiente a Kafka y marca `published`.
+3. Workers consumen el evento y aplican side effects con deduplicación por `eventId`.
+4. Si ambos estados downstream completan, el pago pasa a `settled`.
+5. Si un worker agota reintentos, marca `payment` como `failed` y publica `payment.failed.v1`.
 
-- [What we're evaluating](#what-were-evaluating)
-- [Challenge 1 — Payment settlement pipeline](#challenge-1--payment-settlement-pipeline)
-- [Challenge 2 — Wallet transfer with distributed saga](#challenge-2--wallet-transfer-with-distributed-saga)
-- [Challenge 3 — Shared platform library design](#challenge-3--shared-platform-library-design)
-- [Tech stack](#tech-stack)
-- [Submission](#submission)
+## Decisiones clave y trade-offs
+1. **Transactional outbox local**: garantiza que no haya pagos sin evento o eventos sin pago (en DB local).
+2. **Relay separado**: evita invocar Kafka dentro de la transacción SQL y respeta frontera de proceso.
+3. **Idempotencia en consumidor por `eventId`**: la deduplicación vive donde debe vivir (downstream), usando PK compuesta en `processed_events`.
+4. **Una sola base PostgreSQL**: menos complejidad operativa para este reto, sacrificando aislamiento por bounded context.
+5. **Kafka local en Docker Compose**: reproducibilidad local sin dependencias cloud.
+6. **Simplicidad sobre abstracción**: código pequeño, directo y defendible.
 
----
+## Por qué monorepo con múltiples procesos
+1. Permite compartir contratos y utilidades sin duplicación.
+2. Mantiene despliegue y versionado coordinado para el challenge.
+3. Conserva separación real de procesos (API, relay, workers) sin caer en monolito runtime.
 
-## What we're evaluating
+## Por qué Kafka local con Docker
+1. Permite probar semántica asíncrona real en local.
+2. Evita dependencias externas o credenciales cloud.
+3. Mantiene setup reproducible para revisión técnica.
 
-We're not looking for a perfect system. We're looking for evidence that you think like a tech lead:
+## Por qué Prisma + una sola base
+1. Prisma acelera modelado y acceso consistente con TypeScript strict.
+2. Una sola base minimiza fricción para demostrar el patrón core.
+3. El reto pide solidez mínima, no despliegue enterprise multi-DB.
 
-- You treat trade-offs as first-class decisions, not implementation details.
-- You build for the engineer who reads your code six months from now, not for the PR reviewer today.
-- You can identify the antipattern in a brief before someone points it out to you.
-- You know what you deliberately left out — and why.
+## Qué se dejó fuera deliberadamente
+1. Debezium CDC.
+2. Temporal/Saga externa.
+3. Redis.
+4. Schema Registry.
+5. Confluent Cloud.
+6. Multi-country namespace real (solo considerado como mejora futura).
 
-Every challenge includes an **optional escalation**. It's genuinely optional; finishing the core well beats rushing to the escalation.
+## Estructura
+Se implementó exactamente el layout solicitado en el prompt bajo `apps/` y `packages/`.
 
----
-
-## Challenge 1 — Payment settlement pipeline
-
-### Premise
-
-You're building the payment processing backbone for a multi-country wallet. A payment initiated in one country may touch ledger entries, fraud scoring, and notification services that are fully independent. Your solution must remain correct under partial failures and message redelivery.
-
-### Architecture overview
-
-
+## Contratos y topics
+Envelope:
+```ts
+export type EventEnvelope<T> = {
+  eventId: string;
+  eventType: string;
+  occurredAt: string;
+  aggregateId: string;
+  traceId: string;
+  payload: T;
+};
 ```
-Payment API ──► Outbox table ──[relay]──► Kafka topic
-                                          (payment.created.v1)
-                                               │
-                          ┌────────────────────┼────────────────────┐
-                          ▼                    ▼                    ▼
-                   FraudConsumer        LedgerConsumer       NotifyConsumer
-                   (risk scoring)    (double-entry write)   (push / email)
-                          │                    │
-                          └────────┬───────────┘
-                                   ▼
-                             Status saga
-                          (eventual consistency)
-                               │
-                    ┌──────────┴──────────┐
-                    ▼ (on failure)        ▼ (on success)
-               DLT topic            payment.settled.v1
-          (payment.failed.v1)
+
+Eventos y topics versionados:
+1. `payment.created.v1`
+2. `payment.failed.v1` (DLT)
+3. `payment.settled.v1`
+
+## Modelo de datos implementado
+En `packages/db/prisma/schema.prisma` se implementan:
+1. `payments`
+2. `outbox_events`
+3. `processed_events`
+4. `fraud_results`
+5. `ledger_entries`
+
+## API
+### POST `/payments`
+Ejemplo request:
+```json
+{
+  "countryCode": "PE",
+  "amount": 120.50,
+  "currency": "PEN"
+}
 ```
 
-### Required deliverables
+Respuesta mínima:
+```json
+{
+  "paymentId": "uuid",
+  "status": "pending",
+  "consistency": {
+    "model": "eventual",
+    "message": "Payment accepted. Final status depends on downstream consumers."
+  }
+}
+```
 
-1. **Transactional outbox** — A `PaymentService` (NestJS) that writes a payment record and its outbox entry in a single local transaction. A separate relay process publishes to Kafka. The broker must never be called inside the database transaction.
+### GET `/payments/:id`
+Ejemplo:
+```json
+{
+  "paymentId": "uuid",
+  "status": "pending",
+  "fraudStatus": "completed",
+  "ledgerStatus": "pending",
+  "consistency": {
+    "model": "eventual",
+    "message": "This resource may remain pending until downstream consumers complete."
+  }
+}
+```
 
-2. **Idempotent consumers** — At least two downstream consumers (`FraudConsumer`, `LedgerConsumer`) in separate NestJS modules. Reprocessing the same event twice must produce no observable side effect.
+## Ejecución local
+Prerequisitos:
+1. Docker y Docker Compose.
+2. Node 20+ y pnpm.
 
-3. **DLT handler** — When a consumer exceeds its retry budget, emit a compensating event to a Dead Letter Topic rather than silently dropping the message.
+Pasos:
+1. Instalar dependencias:
+```bash
+pnpm install
+```
+2. Generar cliente Prisma:
+```bash
+pnpm prisma:generate
+```
+3. Levantar todo:
+```bash
+docker compose up --build
+```
 
-4. **Status query endpoint** — A GET endpoint that reflects eventual consistency honestly. A payment may return `pending` after creation and only transition to `settled` or `failed` once both consumers have acknowledged.
+Servicios:
+1. API: `http://localhost:3000`
+2. Kafka UI: `http://localhost:8080`
 
-### What a strong solution looks like
+## Probar el flujo
+1. Crear pago:
+```bash
+curl -X POST http://localhost:3000/payments \
+  -H "Content-Type: application/json" \
+  -d '{"countryCode":"PE","amount":120.5,"currency":"PEN"}'
+```
+2. Consultar estado:
+```bash
+curl http://localhost:3000/payments/<paymentId>
+```
+3. Observar transición de `pending` a `settled` cuando ambos workers completen.
+4. Para forzar fallo en ledger y probar DLT: usar `currency: "ERR"`.
 
-- The outbox relay is a distinct process boundary — not a `setInterval` in the same NestJS app.
-- Idempotency keys live on the consumer side (keyed by `eventId`), not on the producer side.
-- The status endpoint documents its consistency guarantees explicitly — either in code comments or in an API response envelope.
-- The candidate can explain what happens if the relay crashes between writing the outbox entry and publishing to Kafka.
+## Probar endpoints con Postman (`payment-api`)
+Archivos incluidos:
+1. `apps/payment-api/postman/payment-api.postman_collection.json`
+2. `apps/payment-api/postman/payment-api.local.postman_environment.json`
 
-### What disqualifies a solution
+Pasos:
+1. Levantar stack (`docker compose up --build`) y confirmar API en `http://localhost:3000`.
+2. En Postman, importar colección y environment.
+3. Seleccionar environment `payment-api local`.
+4. Ejecutar la colección en este orden (o con Collection Runner):
+   1. `POST /payments - create (valid)`
+   2. `POST /payments - validation error (countryCode)`
+   3. `POST /payments - validation error (amount)`
+   4. `GET /payments/:id - status (existing payment)`
+   5. `GET /payments/:id - not found`
 
-- Calling `kafkaClient.emit()` directly inside a `@Transaction()` decorator. This is the most common mistake at this level and it produces silent data loss.
+Notas:
+1. La primera request guarda `paymentId` automáticamente como variable de colección para la consulta de estado.
+2. `GET /payments/:id - status (existing payment)` puede devolver `pending`, `settled` o `failed` por consistencia eventual.
 
-### Optional escalation
+## Tests mínimos incluidos
+1. `PaymentService`: creación payment+outbox en transacción local.
+2. `PaymentService`: guardrail de no broker dentro del flujo.
+3. `FraudConsumer`: mismo `eventId` no duplica side effects.
+4. `LedgerConsumer`: mismo `eventId` no duplica ledger entries.
+5. Status query: puede permanecer `pending` con downstream incompleto.
 
-Add a per-country topic namespace (`pe.payments.payment.created.v1`, `mx.payments.payment.created.v1`) and document what that implies for consumer group strategy across countries.
+Ejecutar:
+```bash
+pnpm test
+pnpm typecheck
+pnpm lint
+```
 
----
+## Limitaciones conocidas
+1. `payment.settled.v1` se emite best-effort desde workers (sin outbox adicional downstream).
+2. Retry policy es simple (constante) para mantener implementación mínima.
+3. No hay particionamiento por país ni strategy de rebalancing avanzada.
+4. No se implementa observabilidad avanzada (métricas distribuidas), solo logging útil.
 
-## Challenge 2 — Wallet transfer with distributed saga
-
-### Premise
-
-Transferring funds between two wallets in different countries requires debiting one ledger and crediting another atomically — without a distributed transaction. You will implement a saga that is safe to replay from any step.
-
-### Required deliverables
-
-1. **Transfer orchestrator** — Implement a `TransferOrchestrator` that drives the following steps in order:
-
-   ```
-   DebitWallet → CreditWallet → SettleFX → EmitReceipt
-   ```
-
-   You may use Temporal, a hand-rolled state machine, or pure Kafka choreography. You must justify the choice in writing.
-
-2. **Compensation on failure** — If `CreditWallet` fails after `DebitWallet` succeeds, the orchestrator must issue a `ReverseDebit` compensation event. Silent failure is not acceptable.
-
-3. **CQRS read model** — A `TransferReadModel` updated via projected events, not by reading the write-side database. The read model must be consistent enough to serve a GET within 500ms of the saga completing.
-
-4. **Concurrency safety** — If two transfers attempt to debit the same wallet simultaneously, the second must detect the conflict and fail fast. A negative balance is never acceptable.
-
-### What a strong solution looks like
-
-- The candidate picks a clear position on choreography vs. orchestration and can articulate the trade-off: choreography reduces coupling but makes the overall saga state invisible; orchestration makes state explicit but introduces a coordinator as a single point of failure.
-- The idempotency key is placed on the saga instance, not on individual commands, and the candidate can explain why.
-- The read model answers the question: "how do I know the read model isn't serving stale data immediately after the saga closes?" — whether via versioned events, a subscription mechanism, or a documented staleness window.
-
-### What disqualifies a solution
-
-A single database transaction spanning two service databases. This is the antipattern the challenge is explicitly designed to surface.
-
-### Optional escalation
-
-Model the FX settlement step as an external API call with a timeout. Show how the saga handles a timeout that leaves the FX state ambiguous — neither confirmed nor rejected.
-
----
-
-## Challenge 3 — Shared platform library design
-
-### Premise
-
-Your platform team owns the internal libraries that all product squads import. You've been asked to design and ship `@yape/kafka-module` — a NestJS dynamic module that wraps Kafka producer and consumer setup, enforces topic naming conventions, wires DLT automatically, and exposes typed event contracts. You are the only author. Four squads will consume it within the quarter.
-
-### Required deliverables
-
-1. **Dynamic module API** — A `KafkaModule.forFeature({ topics, consumerGroup })` dynamic module. The module must register producers and consumers via NestJS dependency injection, not global singletons.
-
-2. **`@KafkaEvent()` decorator** — A `@KafkaEvent(topicName)` decorator that binds a handler method to a Kafka consumer, analogous to how NestJS `@MessagePattern` works internally.
-
-3. **Automatic DLT wiring** — If a handler throws and exceeds `maxRetries`, the module routes the message to `{original-topic}.dlt` without any code change required in the consuming squad.
-
-4. **`EventContract<T>` type** — A generic type that enforces schema shape at compile time. Squads must not be able to publish to a topic with a payload that doesn't match the declared contract. A type mismatch must be a TypeScript compile error, not a runtime exception.
-
-5. **ADR (Architecture Decision Record)** — Written in MADR format, covering:
-   - Why NestJS dynamic modules over a plain exported class.
-   - How you handle schema evolution without breaking consumers who still reference an older version.
-   - What you would add with two more weeks.
-
-### What a strong solution looks like
-
-- The module API feels native to NestJS. A squad importing it should not need to understand Kafka internals to publish an event.
-- Schema evolution is addressed concretely: additive fields, topic versioning (`payment.created.v2`), or a schema registry — the candidate picks one and defends it, with trade-offs acknowledged.
-- The ADR reads like it was written for a real team, not as a post-hoc justification. It documents the options that were rejected and why.
-
-### What a weak solution looks like
-
-- The module wraps Kafka imperatively and tells squads to call `producer.send()` directly.
-- `EventContract<T>` is a runtime validation only (e.g. a Zod schema), with no compile-time enforcement.
-- The ADR is a bulleted list with no trade-off reasoning.
-
-### Optional escalation
-
-Publish the module to a local [Verdaccio](https://verdaccio.org/) registry. Document your versioning and release strategy, including how you would communicate breaking changes to consuming squads.
-
----
-
-## Tech stack
-
-The following is the expected stack. Deviations are acceptable if you document the reason.
-
-| Layer | Expected |
-|---|---|
-| Runtime | Node.js 20+ |
-| Framework | NestJS |
-| Messaging | Kafka (local via Docker, or Confluent Cloud) |
-| Database | Your choice — document why |
-| Orchestration | Temporal, native Kafka, or a state machine — justify the choice |
-| Language | TypeScript (strict mode) |
-| Containers | Docker Compose for local environment |
-
----
-
-## Submission
-
-1. Fork this repository.
-2. Create a branch named `challenge/{your-name}`.
-3. Open a pull request against `main` in this repository.
-
-Your PR description must include:
-
-- Which challenge you chose and why.
-- The key architectural decisions you made and the alternatives you rejected.
-- What you would do differently with more time.
-- Any known limitations or shortcuts taken.
-
-**There is no time limit stated intentionally.** A focused solution delivered in four hours tells us more than an exhaustive one delivered in two days. Prioritise depth of reasoning over breadth of features.
-
-If you have questions, open an issue on this repository. We respond to issues within one business day.
+## Mejoras con más tiempo
+1. Outbox también para eventos downstream (`payment.settled.v1`, `payment.failed.v1`) para entrega más robusta.
+2. Backoff exponencial con jitter y circuit breakers.
+3. Pruebas de integración end-to-end con Testcontainers.
+4. Métricas y trazabilidad OpenTelemetry.
+5. Namespacing por país como extensión no-core.
